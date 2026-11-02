@@ -28,22 +28,22 @@ def get_external_db_path():
     return os.path.join(exe_dir, "questions.db")
 
 def ensure_external_db():
-    """确保外部数据库文件存在，如果不存在则创建新的空题库文件"""
+    """确保外部数据库文件存在，如果不存在则从内置资源复制或创建新的题库文件"""
     external_db_path = get_external_db_path()
     
-    # 如果外部数据库文件不存在，创建新的题库文件
+    # 如果外部数据库文件不存在，优先复制内置题库
     if not os.path.exists(external_db_path):
         try:
-            # 导入数据库模块来创建新的题库文件
-            from database import QuestionDatabase
-            print(f"首次运行，正在创建题库文件: {external_db_path}")
-            
-            # 创建数据库实例，这会自动创建数据库文件和表结构
-            db = QuestionDatabase(external_db_path)
-            db.close()
-            
-            print(f"题库文件已创建: {external_db_path}")
-            print("提示: 您可以通过程序界面导入题目，或直接编辑此数据库文件")
+            internal_db = get_resource_path("questions.db")
+            if os.path.exists(internal_db) and os.path.abspath(internal_db) != os.path.abspath(external_db_path):
+                shutil.copyfile(internal_db, external_db_path)
+                print(f"已从内置资源初始化题库文件: {external_db_path}")
+            else:
+                from database import QuestionDatabase
+                print(f"首次运行，正在创建题库文件: {external_db_path}")
+                db = QuestionDatabase(external_db_path)
+                db.close()
+                print(f"题库文件已创建: {external_db_path}")
         except Exception as e:
             print(f"创建题库文件时发生错误: {e}")
             # 如果创建失败，回退到当前目录

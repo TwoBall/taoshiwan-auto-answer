@@ -142,6 +142,7 @@ cython_debug/
 *.temp
 *.bak
 
-# 系统文件
+# 系统与工具配置
 .DS_Store
 Thumbs.db
+.workbuddy/

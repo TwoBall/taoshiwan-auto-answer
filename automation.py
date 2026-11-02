@@ -1298,6 +1298,69 @@ class QuestionBankImporter(QObject):
         self.driver = None
         self.delay_multiplier = 1.0  # 延迟倍数，与主程序保持一致
         self.show_browser = show_browser  # 是否显示浏览器窗口
+        self.chrome_processes = []  # 记录当前线程启动的Chrome进程
+
+    def kill_chrome_processes(self):
+        """只关闭当前线程的Chrome进程"""
+        try:
+            if psutil and self.chrome_processes:
+                for pid in self.chrome_processes[:]:
+                    try:
+                        proc = psutil.Process(pid)
+                        if proc.is_running() and 'chrome' in proc.name().lower():
+                            proc.kill()
+                            self.log_signal.emit(f"已关闭当前线程的Chrome进程: {pid}")
+                            self.chrome_processes.remove(pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+                        if pid in self.chrome_processes:
+                            self.chrome_processes.remove(pid)
+                        pass
+            
+            if hasattr(self, 'driver') and self.driver and hasattr(self.driver, 'service'):
+                try:
+                    service = self.driver.service
+                    if hasattr(service, 'process') and service.process:
+                        service.process.terminate()
+                        self.log_signal.emit("已通过service关闭chromedriver进程")
+                except Exception as e:
+                    self.log_signal.emit(f"通过service关闭进程失败: {str(e)}")
+        except Exception as e:
+            self.log_signal.emit(f"关闭Chrome进程时出错: {str(e)}")
+
+    def track_chrome_processes(self):
+        """跟踪当前启动的Chrome进程"""
+        try:
+            if psutil:
+                existing_pids = set()
+                for proc in psutil.process_iter(['pid', 'name']):
+                    try:
+                        if 'chrome' in proc.info['name'].lower():
+                            existing_pids.add(proc.info['pid'])
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                return existing_pids
+        except Exception as e:
+            self.log_signal.emit(f"跟踪Chrome进程时出错: {str(e)}")
+        return set()
+
+    def update_chrome_processes(self, existing_pids):
+        """更新Chrome进程列表，记录新启动的进程"""
+        try:
+            if psutil:
+                current_pids = set()
+                for proc in psutil.process_iter(['pid', 'name']):
+                    try:
+                        if 'chrome' in proc.info['name'].lower():
+                            current_pids.add(proc.info['pid'])
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                
+                new_pids = current_pids - existing_pids
+                self.chrome_processes.extend(new_pids)
+                if new_pids:
+                    self.log_signal.emit(f"检测到新启动的Chrome进程: {list(new_pids)}")
+        except Exception as e:
+            self.log_signal.emit(f"更新Chrome进程列表时出错: {str(e)}")
     
     def wait_with_delay(self, base_delay=None, min_delay=None):
         """统一的延迟控制方法"""
@@ -1848,3 +1911,5 @@ class QuestionBankImporter(QObject):
                 self.log_signal.emit("🧹 浏览器资源已清理")
         except Exception as e:
             self.log_signal.emit(f"⚠️ 清理资源时发生错误: {str(e)}")
+        finally:
+            self.kill_chrome_processes()
