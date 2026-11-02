@@ -43,7 +43,7 @@ jobs:
           pyinstaller --noconfirm --clean \
             --onefile \
             --windowed \
-            --name="暴打淘师湾" \
+            --name="taoshiwan-auto-answer" \
             --add-data "questions.db;." \
             --add-data "config.py;." \
             --hidden-import="selenium" \
@@ -62,7 +62,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/release
-          Copy-Item "dist/暴打淘师湾.exe" -Destination "dist/release/"
+          Copy-Item "dist/taoshiwan-auto-answer.exe" -Destination "dist/release/暴打淘师湾.exe"
+          Copy-Item "dist/taoshiwan-auto-answer.exe" -Destination "dist/release/taoshiwan-auto-answer.exe"
           Copy-Item "questions.db" -Destination "dist/release/"
           Copy-Item "README.md" -Destination "dist/release/"
           Copy-Item "config.py" -Destination "dist/release/"
@@ -73,7 +74,7 @@ jobs:
         with:
           name: taoshiwan-auto-answer-windows
           path: |
-            dist/暴打淘师湾.exe
+            dist/taoshiwan-auto-answer.exe
             dist/taoshiwan-auto-answer-windows.zip
           retention-days: 30
 
@@ -82,7 +83,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/暴打淘师湾.exe
+            dist/taoshiwan-auto-answer.exe
             dist/taoshiwan-auto-answer-windows.zip
           draft: false
           prerelease: false

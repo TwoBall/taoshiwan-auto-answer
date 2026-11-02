@@ -27,27 +27,17 @@ def get_external_db_path():
     
     return os.path.join(exe_dir, "questions.db")
 
-def ensure_external_db():
-    """确保外部数据库文件存在，如果不存在则从内置资源复制或创建新的题库文件"""
+def get_db_path():
+    """获取数据库文件路径：优先检测外部同级目录题库，若无则直接使用内置题库，绝不在运行时释放文件到外部"""
     external_db_path = get_external_db_path()
+    # 外部同级目录下如果存在题库，优先使用（方便用户自定义题库）
+    if os.path.exists(external_db_path):
+        return external_db_path
     
-    # 如果外部数据库文件不存在，优先复制内置题库
-    if not os.path.exists(external_db_path):
-        try:
-            internal_db = get_resource_path("questions.db")
-            if os.path.exists(internal_db) and os.path.abspath(internal_db) != os.path.abspath(external_db_path):
-                shutil.copyfile(internal_db, external_db_path)
-                print(f"已从内置资源初始化题库文件: {external_db_path}")
-            else:
-                from database import QuestionDatabase
-                print(f"首次运行，正在创建题库文件: {external_db_path}")
-                db = QuestionDatabase(external_db_path)
-                db.close()
-                print(f"题库文件已创建: {external_db_path}")
-        except Exception as e:
-            print(f"创建题库文件时发生错误: {e}")
-            # 如果创建失败，回退到当前目录
-            external_db_path = "questions.db"
+    # 外部不存在时，直接使用打包内置资源，不执行任何外部文件复制或释放
+    internal_db = get_resource_path("questions.db")
+    if os.path.exists(internal_db):
+        return internal_db
     
     return external_db_path
 
@@ -57,8 +47,8 @@ WEBSITE_URL = "https://infotech.51taoshi.com/hw/fore/index.do"
 # 默认密码
 DEFAULT_PASSWORD = "123456"
 
-# 数据库文件路径 - 优先使用外部文件
-DATABASE_PATH = ensure_external_db()
+# 数据库文件路径 - 优先使用外部文件，无则静默读取内置，零文件释放
+DATABASE_PATH = get_db_path()
 
 # 浏览器配置
 # 浏览器显示设置

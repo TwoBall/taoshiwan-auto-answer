@@ -50,7 +50,7 @@ def main():
         "--clean",
         "--onefile",
         "--windowed",
-        "--name=暴打淘师湾",
+        "--name=taoshiwan-auto-answer",
         "--add-data", "questions.db;.",
         "--add-data", "config.py;.",
         "--hidden-import=selenium",
@@ -71,13 +71,15 @@ def main():
     release_dir = os.path.join("dist", "release")
     os.makedirs(release_dir, exist_ok=True)
 
-    exe_path = os.path.join("dist", "暴打淘师湾.exe")
+    exe_path = os.path.join("dist", "taoshiwan-auto-answer.exe")
     if not os.path.exists(exe_path):
         print(f"❌ 打包失败: 未生成 {exe_path}")
         sys.exit(1)
 
     print("==> 正在准备发布文件...")
-    shutil.copy(exe_path, release_dir)
+    # 同时提供英文原名与中文重命名副本，兼顾直接下载与解压查看
+    shutil.copy(exe_path, os.path.join(release_dir, "taoshiwan-auto-answer.exe"))
+    shutil.copy(exe_path, os.path.join(release_dir, "暴打淘师湾.exe"))
     shutil.copy("questions.db", release_dir)
     shutil.copy("config.py", release_dir)
     if os.path.exists("README.md"):
