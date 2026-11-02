@@ -15,6 +15,35 @@
 
 ---
 
+## 📸 界面预览 (Screenshots)
+
+### 1. 现代化响应式主工作台
+> 集成顶部专属打斗 Logo 品牌卡片、五大运营数据看板、批量账号管理、自绘彩色状态药丸徽章与全功能分级日志控制台。
+
+<div align="center">
+  <img src="assets/preview_main_window.png" width="950" alt="暴打淘师湾主工作台界面" />
+</div>
+
+<br />
+
+### 2. 精美现代手册与使用指南弹窗
+<div align="center">
+  <table>
+    <tr>
+      <td align="center" width="50%">
+        <b>🥊 关于 暴打淘师湾</b><br /><br />
+        <img src="assets/preview_about_dialog.png" width="440" alt="关于弹窗" />
+      </td>
+      <td align="center" width="50%">
+        <b>💡 快速使用指南手册</b><br /><br />
+        <img src="assets/preview_help_dialog.png" width="440" alt="使用指南弹窗" />
+      </td>
+    </tr>
+  </table>
+</div>
+
+---
+
 ## 🌟 核心特性与架构亮点
 
 ### 1. 🥊 官方专属品牌与现代设计 (Fluent / Flat Design)
