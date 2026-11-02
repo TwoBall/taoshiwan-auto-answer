@@ -51,6 +51,9 @@ DEFAULT_PASSWORD = "123456"
 DATABASE_PATH = get_db_path()
 
 # 浏览器配置
+# 浏览器类型选择: 'auto' (智能自动，Windows优先使用系统自带Edge), 'edge' (强制Edge), 'chrome' (强制Chrome)
+DEFAULT_BROWSER = "auto"
+
 # 浏览器显示设置
 SHOW_BROWSER_WINDOW = True  # 强制显示外部浏览器窗口，作为主要显示界面
 USE_EXTERNAL_BROWSER_AS_DISPLAY = True  # 使用外部浏览器作为主要显示界面
@@ -143,10 +146,7 @@ XPATHS = {
 # UI配置
 UI_CONFIG = {
     "window_title": "Selenium暴打淘师湾作业网",
-    "window_geometry": (100, 100, 800, 600),  # 设置窗口大小为800x600
-    "control_panel_width": 320,  # 减少控制面板宽度
-    "start_button_style": "background-color: #4CAF50; color: white; font-weight: bold; padding: 6px; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;",
-    "label_style": "font-weight: bold; font-size: 13px; font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Arial, sans-serif;",
+    "window_geometry": (100, 100, 1040, 700),  # 现代化工作台宽屏分辨率
     "global_font_family": "Microsoft YaHei, PingFang SC, Helvetica Neue, Arial, sans-serif"
 }
 

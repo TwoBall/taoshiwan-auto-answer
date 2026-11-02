@@ -44,15 +44,29 @@ jobs:
             --onefile \
             --windowed \
             --name="taoshiwan-auto-answer" \
+            --icon="assets/app_icon.ico" \
             --add-data "questions.db;." \
             --add-data "config.py;." \
+            --add-data "browser_manager.py;." \
+            --add-data "styles.py;." \
+            --add-data "log_widget.py;." \
+            --add-data "assets;assets" \
             --hidden-import="selenium" \
             --hidden-import="selenium.webdriver" \
             --hidden-import="selenium.webdriver.chrome.service" \
+            --hidden-import="selenium.webdriver.chrome.options" \
+            --hidden-import="selenium.webdriver.edge.service" \
+            --hidden-import="selenium.webdriver.edge.options" \
+            --hidden-import="browser_manager" \
+            --hidden-import="styles" \
+            --hidden-import="log_widget" \
             --hidden-import="PyQt5" \
             --hidden-import="PyQt5.QtCore" \
             --hidden-import="PyQt5.QtWidgets" \
             --hidden-import="PyQt5.QtGui" \
+            --hidden-import="PyQt5.QtSvg" \
+            --hidden-import="PIL" \
+            --hidden-import="PIL.Image" \
             --hidden-import="psutil" \
             --hidden-import="bs4" \
             --exclude-module="PyQt5.Qt" \
@@ -67,6 +81,12 @@ jobs:
           Copy-Item "questions.db" -Destination "dist/release/"
           Copy-Item "README.md" -Destination "dist/release/"
           Copy-Item "config.py" -Destination "dist/release/"
+          Copy-Item "browser_manager.py" -Destination "dist/release/"
+          Copy-Item "styles.py" -Destination "dist/release/"
+          Copy-Item "log_widget.py" -Destination "dist/release/"
+          if (Test-Path "assets") {
+            Copy-Item -Recurse -Force "assets" -Destination "dist/release/assets"
+          }
           Compress-Archive -Path "dist/release/*" -DestinationPath "dist/taoshiwan-auto-answer-windows.zip" -Force
 
       - name: Upload Build Artifacts

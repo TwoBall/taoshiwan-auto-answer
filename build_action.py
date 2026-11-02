@@ -51,15 +51,29 @@ def main():
         "--onefile",
         "--windowed",
         "--name=taoshiwan-auto-answer",
+        "--icon=assets/app_icon.ico",
         "--add-data", "questions.db;.",
         "--add-data", "config.py;.",
+        "--add-data", "browser_manager.py;.",
+        "--add-data", "styles.py;.",
+        "--add-data", "log_widget.py;.",
+        "--add-data", "assets;assets",
         "--hidden-import=selenium",
         "--hidden-import=selenium.webdriver",
         "--hidden-import=selenium.webdriver.chrome.service",
+        "--hidden-import=selenium.webdriver.chrome.options",
+        "--hidden-import=selenium.webdriver.edge.service",
+        "--hidden-import=selenium.webdriver.edge.options",
+        "--hidden-import=browser_manager",
+        "--hidden-import=styles",
+        "--hidden-import=log_widget",
         "--hidden-import=PyQt5",
         "--hidden-import=PyQt5.QtCore",
         "--hidden-import=PyQt5.QtWidgets",
         "--hidden-import=PyQt5.QtGui",
+        "--hidden-import=PyQt5.QtSvg",
+        "--hidden-import=PIL",
+        "--hidden-import=PIL.Image",
         "--hidden-import=psutil",
         "--hidden-import=bs4",
         "--exclude-module=PyQt5.Qt",
@@ -82,6 +96,11 @@ def main():
     shutil.copy(exe_path, os.path.join(release_dir, "暴打淘师湾.exe"))
     shutil.copy("questions.db", release_dir)
     shutil.copy("config.py", release_dir)
+    shutil.copy("browser_manager.py", release_dir)
+    shutil.copy("styles.py", release_dir)
+    shutil.copy("log_widget.py", release_dir)
+    if os.path.exists("assets"):
+        shutil.copytree("assets", os.path.join(release_dir, "assets"), dirs_exist_ok=True)
     if os.path.exists("README.md"):
         shutil.copy("README.md", release_dir)
 

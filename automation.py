@@ -17,34 +17,64 @@ from config import WEBSITE_URL, XPATHS, TIMEOUTS, BROWSER_OPTIONS, OPERATION_DEL
 import config
 import re
 from bs4 import BeautifulSoup
+from browser_manager import (
+    create_webdriver,
+    track_browser_processes,
+    kill_specific_processes,
+    resolve_browser_type,
+    detect_available_browsers
+)
 
-class BrowserAutomation(QThread):
-    log_signal = pyqtSignal(str)
-    status_signal = pyqtSignal(int, str)
-    progress_signal = pyqtSignal(int, str)  # 进度信号: (百分比, 描述)
+class BaseBrowserWorker:
+    """浏览器自动化工作器基类，封装生命周期、驱动维护、进程追踪与统一等待"""
     
-    def __init__(self, accounts, question_db):
-        super().__init__()
-        self.accounts = accounts
-        self.question_db = question_db
-        self.current_account_index = 0
-        self.running = False
-        self.paused = False
+    def __init__(self, browser_type=None, show_browser=True):
+        self.browser_type = browser_type or getattr(config, "DEFAULT_BROWSER", "auto")
+        self.actual_browser_type = None
+        self.show_browser = show_browser
         self.driver = None
-        self.operation_delay = OPERATION_DELAY['default']  # 默认延迟时间
-        self._element_cache = {}  # 元素缓存
-        self._wait_cache = {}     # WebDriverWait对象缓存
-        self.skipped_homeworks = set()  # 记录已跳过的作业，避免重复处理
-        self.homework_retry_counts = {}  # 记录作业处理次数，防止无限死循环
-        self.browser_process_id = None  # 记录当前浏览器进程ID
-        self.chrome_processes = []  # 记录当前线程启动的Chrome进程
+        self.operation_delay = OPERATION_DELAY['default']
+        self.delay_multiplier = 1.0
+        self._wait_cache = {}
+        self.browser_processes = []
+        self.chrome_processes = self.browser_processes  # 向后兼容别名
+
+    def _emit_log(self, msg):
+        """统一日志发射助手（优先使用Qt信号发射，无则输出控制台）"""
+        if hasattr(self, 'log_signal') and self.log_signal:
+            self.log_signal.emit(msg)
+        else:
+            print(msg)
+
+    def set_operation_delay(self, delay_seconds):
+        """设置操作延迟时间"""
+        self.operation_delay = max(OPERATION_DELAY['min'], min(delay_seconds, OPERATION_DELAY['max']))
+        self._emit_log(f"操作延迟已设置为: {self.operation_delay:.2f}秒")
+
+    def set_delay_multiplier(self, multiplier):
+        """设置延迟倍数"""
+        self.delay_multiplier = max(0.1, multiplier)
+
+    def wait_with_delay(self, base_delay=None, min_delay=None):
+        """统一的延迟控制方法，结合基础延迟与倍数"""
+        delay = (base_delay if base_delay is not None else self.operation_delay) * self.delay_multiplier
+        if min_delay is not None:
+            delay = max(delay, min_delay)
+        time.sleep(delay)
+
+    def get_wait(self, timeout=None):
+        """获取或缓存WebDriverWait对象"""
+        timeout = timeout or TIMEOUTS["element_wait"]
+        if timeout not in self._wait_cache:
+            self._wait_cache[timeout] = WebDriverWait(self.driver, timeout)
+        return self._wait_cache[timeout]
 
     def handle_browser_alert(self, accept=True):
         """检测并处理可能出现的浏览器原生Alert或Confirm弹窗，防止阻塞流程"""
         try:
             alert = self.driver.switch_to.alert
             alert_text = alert.text
-            self.log_signal.emit(f"检测到浏览器原生弹窗: {alert_text}")
+            self._emit_log(f"检测到浏览器原生弹窗: {alert_text}")
             if accept:
                 alert.accept()
             else:
@@ -53,95 +83,202 @@ class BrowserAutomation(QThread):
             return alert_text
         except:
             return None
-    
-    def set_operation_delay(self, delay_seconds):
-        """设置操作延迟时间"""
-        self.operation_delay = max(OPERATION_DELAY['min'], min(delay_seconds, OPERATION_DELAY['max']))
-        self.log_signal.emit(f"操作延迟已设置为: {self.operation_delay:.2f}秒")
-    
-    def wait_with_delay(self, custom_delay=None):
-        """统一的延迟等待函数"""
-        delay = custom_delay if custom_delay is not None else self.operation_delay
-        time.sleep(delay)
-    
-    def get_wait(self, timeout=None):
-        """获取缓存的WebDriverWait对象"""
-        timeout = timeout or TIMEOUTS["element_wait"]
-        if timeout not in self._wait_cache:
-            self._wait_cache[timeout] = WebDriverWait(self.driver, timeout)
-        return self._wait_cache[timeout]
-    
-    def check_login_errors(self):
-        """检查layer.js弹窗中的登录错误信息"""
+
+    def track_browser_processes(self):
+        """跟踪当前运行的浏览器与驱动进程"""
+        return track_browser_processes(self.actual_browser_type or self.browser_type)
+
+    def track_chrome_processes(self):
+        """向后兼容别名"""
+        return self.track_browser_processes()
+
+    def update_browser_processes(self, existing_pids):
+        """更新浏览器进程列表，精准记录新启动的进程"""
         try:
-            # 检查是否有layer弹窗存在
-            layer_elements = self.driver.find_elements(By.CSS_SELECTOR, ".layui-layer-content")
+            current_pids = self.track_browser_processes()
+            new_pids = current_pids - existing_pids
+            self.browser_processes.extend(new_pids)
+            if new_pids:
+                self._emit_log(f"检测到新启动的浏览器自动化进程: {list(new_pids)}")
+        except Exception as e:
+            self._emit_log(f"更新浏览器进程列表时出错: {str(e)}")
+
+    def update_chrome_processes(self, existing_pids):
+        """向后兼容别名"""
+        self.update_browser_processes(existing_pids)
+
+    def kill_browser_processes(self):
+        """只关闭当前工作器记录的浏览器自动化进程"""
+        try:
+            if self.browser_processes:
+                kill_specific_processes(self.browser_processes, self._emit_log)
+                self.browser_processes.clear()
+            
+            if hasattr(self, 'driver') and self.driver and hasattr(self.driver, 'service'):
+                try:
+                    service = self.driver.service
+                    if hasattr(service, 'process') and service.process:
+                        service.process.terminate()
+                        self._emit_log("已通过service关闭WebDriver后台进程")
+                except Exception as e:
+                    self._emit_log(f"通过service关闭进程失败: {str(e)}")
+        except Exception as e:
+            self._emit_log(f"关闭浏览器进程时出错: {str(e)}")
+
+    def kill_chrome_processes(self):
+        """向后兼容别名"""
+        self.kill_browser_processes()
+
+    def reset_session_state(self):
+        """在处理每个账号前/后，彻底清理浏览器会话与弹窗状态，保证干净的运行环境"""
+        if not self.driver:
+            return
+        try:
+            # 1. 清理所有 Cookie，彻底断开上一个账号的 Session
+            try:
+                self.driver.delete_all_cookies()
+            except Exception:
+                pass
+            
+            # 2. 访问首页重置页面
+            try:
+                self.driver.get(WEBSITE_URL)
+            except Exception:
+                pass
+            
+            # 3. 关闭所有残留的 layer 弹窗、遮罩层与登录模态框
+            try:
+                self.driver.execute_script("""
+                    try {
+                        if (window.layer && window.layer.closeAll) {
+                            window.layer.closeAll();
+                        }
+                    } catch(e) {}
+                    try {
+                        var shades = document.querySelectorAll('.layui-layer-shade, .layui-layer');
+                        shades.forEach(function(el) { el.remove(); });
+                        var modal = document.getElementById('loginModal');
+                        if (modal) {
+                            modal.style.display = 'none';
+                            modal.classList.remove('in');
+                        }
+                        var backdrop = document.querySelector('.modal-backdrop');
+                        if (backdrop) { backdrop.remove(); }
+                    } catch(e) {}
+                """)
+            except Exception:
+                pass
+        except Exception as e:
+            self._emit_log(f"会话状态重置提示: {str(e)}")
+
+    def check_login_errors(self):
+        """检查layer.js弹窗或原生Alert中的真实登录错误信息（严禁检索静态源码，杜绝误判）"""
+        try:
+            # 1. 优先检查原生Alert弹窗
+            alert_text = self.handle_browser_alert()
+            if alert_text:
+                return alert_text
+
+            # 2. 检查页面上真实渲染且可见的 layer 弹窗
+            layer_elements = self.driver.find_elements(By.CSS_SELECTOR, ".layui-layer-content, .layui-layer-dialog .layui-layer-padding")
             
             for layer in layer_elements:
                 try:
-                    # 检查弹窗是否可见
                     if layer.is_displayed():
                         layer_text = layer.text.strip()
-                        self.log_signal.emit(f"检测到弹窗内容: {layer_text}")
+                        if not layer_text:
+                            continue
+                        self._emit_log(f"检测到可见弹窗内容: {layer_text}")
                         
                         # 检查常见的登录错误信息
                         if any(error in layer_text for error in [
                             "用户名或密码错误", "密码错误", "账号不存在", 
-                            "用户被置为无效", "请填写用户名", "请填写密码"
+                            "用户被置为无效", "请填写用户名", "请填写密码",
+                            "验证码错误", "登录失败"
                         ]):
                             # 尝试关闭弹窗
                             try:
-                                close_btn = layer.find_element(By.CSS_SELECTOR, ".layui-layer-close")
-                                if close_btn.is_displayed():
-                                    close_btn.click()
-                                    self.wait_with_delay(0.5)
-                            except:
+                                close_btns = self.driver.find_elements(By.CSS_SELECTOR, ".layui-layer-close, .layui-layer-btn0")
+                                for btn in close_btns:
+                                    if btn.is_displayed():
+                                        btn.click()
+                                        break
+                            except Exception:
                                 pass
                             return layer_text
-                except:
+                except Exception:
                     continue
             
-            # 也检查页面源码中的错误信息（作为备用方法）
-            page_source = self.driver.page_source
-            if "用户名或密码错误" in page_source:
-                return "用户名或密码错误"
-            elif "密码错误" in page_source:
-                return "密码错误"
-            elif "账号不存在" in page_source:
-                return "账号不存在"
-            elif "用户被置为无效" in page_source:
-                return "用户被置为无效"
-                
             return None
-            
         except Exception as e:
-            self.log_signal.emit(f"检查登录错误时出现异常: {str(e)}")
+            self._emit_log(f"检查登录错误时出现异常: {str(e)}")
             return None
+
+    def cleanup_browser(self):
+        """清理浏览器资源，确保完全关闭"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                self._emit_log("浏览器已正常关闭")
+            except Exception as e:
+                self._emit_log(f"正常关闭浏览器失败: {str(e)}，尝试强制关闭")
+            finally:
+                self.driver = None
+        
+        self.wait_with_delay(1)
+        try:
+            self.kill_browser_processes()
+            self._emit_log("浏览器清理完成")
+        except Exception as e:
+            self._emit_log(f"清理浏览器进程时出错: {str(e)}")
+
+
+class BrowserAutomation(QThread, BaseBrowserWorker):
+    log_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(int, str)
+    progress_signal = pyqtSignal(int, str)  # 进度信号: (百分比, 描述)
+    
+    def __init__(self, accounts, question_db, browser_type=None):
+        QThread.__init__(self)
+        BaseBrowserWorker.__init__(self, browser_type=browser_type, show_browser=config.SHOW_BROWSER_WINDOW)
+        self.accounts = accounts
+        self.question_db = question_db
+        self.current_account_index = 0
+        self.running = False
+        self.paused = False
+        self._element_cache = {}  # 元素缓存
+        self.skipped_homeworks = set()  # 记录已跳过的作业，避免重复处理
+        self.homework_retry_counts = {}  # 记录作业处理次数，防止无限死循环
+        self.browser_process_id = None  # 记录当前浏览器进程ID
     
     def verify_login_status(self):
-        """改进的登录状态验证"""
+        """改进的登录状态验证（基于URL与可见DOM元素）"""
         try:
-            current_url = self.driver.current_url
+            current_url = self.driver.current_url or ""
             
             # 方法1：检查URL是否包含登录成功后的特征
-            if "myHomework.do" in current_url or "stu/" in current_url:
+            if any(k in current_url for k in ["myHomework.do", "stu/", "viewHomework.do"]):
                 self.log_signal.emit(f"通过URL验证登录成功: {current_url}")
                 return True
                 
-            # 方法2：检查页面源码中的登录状态标识
-            page_source = self.driver.page_source
-            if "退出" in page_source or "作业列表" in page_source:
-                self.log_signal.emit("通过页面内容验证登录成功")
-                return True
-                
-            # 方法3：尝试查找登录后才有的元素（使用较短超时）
+            # 方法2：尝试查找登录后可见的退出按钮
             try:
-                logout_element = WebDriverWait(self.driver, 5).until(
-                    EC.presence_of_element_located((By.XPATH, XPATHS["logout_link"])))
-                if logout_element:
-                    self.log_signal.emit("通过退出按钮验证登录成功")
-                    return True
-            except TimeoutException:
+                logout_elements = self.driver.find_elements(By.XPATH, XPATHS["logout_link"])
+                for el in logout_elements:
+                    if el.is_displayed():
+                        self.log_signal.emit("通过退出按钮验证登录成功")
+                        return True
+            except Exception:
+                pass
+
+            # 方法3：尝试查找作业/课程列表相关特征
+            try:
+                courses = self.driver.find_elements(By.XPATH, XPATHS["course_list"])
+                for c in courses:
+                    if c.is_displayed():
+                        self.log_signal.emit("通过课程列表组件验证登录成功")
+                        return True
+            except Exception:
                 pass
                 
             return False
@@ -178,137 +315,39 @@ class BrowserAutomation(QThread):
         self._element_cache.clear()
         self._wait_cache.clear()
     
-    def kill_chrome_processes(self):
-        """只关闭当前线程的Chrome进程"""
-        try:
-            # 如果psutil可用，使用它来关闭特定进程
-            if psutil and self.chrome_processes:
-                for pid in self.chrome_processes[:]:
-                    try:
-                        proc = psutil.Process(pid)
-                        if proc.is_running() and 'chrome' in proc.name().lower():
-                            proc.kill()
-                            self.log_signal.emit(f"已关闭当前线程的Chrome进程: {pid}")
-                            self.chrome_processes.remove(pid)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-                        # 进程已不存在或无权限访问，从列表中移除
-                        if pid in self.chrome_processes:
-                            self.chrome_processes.remove(pid)
-                        pass
-            
-            # 如果没有记录到进程ID，尝试通过driver的service关闭
-            if hasattr(self, 'driver') and self.driver and hasattr(self.driver, 'service'):
-                try:
-                    service = self.driver.service
-                    if hasattr(service, 'process') and service.process:
-                        service.process.terminate()
-                        self.log_signal.emit("已通过service关闭chromedriver进程")
-                except Exception as e:
-                    self.log_signal.emit(f"通过service关闭进程失败: {str(e)}")
-                    
-        except Exception as e:
-            self.log_signal.emit(f"关闭Chrome进程时出错: {str(e)}")    
-    
-    def track_chrome_processes(self):
-        """跟踪当前启动的Chrome进程"""
-        try:
-            if psutil:
-                # 记录当前所有Chrome进程，用于后续识别新启动的进程
-                existing_pids = set()
-                for proc in psutil.process_iter(['pid', 'name']):
-                    try:
-                        if 'chrome' in proc.info['name'].lower():
-                            existing_pids.add(proc.info['pid'])
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                return existing_pids
-        except Exception as e:
-            self.log_signal.emit(f"跟踪Chrome进程时出错: {str(e)}")
-        return set()
-    
-    def update_chrome_processes(self, existing_pids):
-        """更新Chrome进程列表，记录新启动的进程"""
-        try:
-            if psutil:
-                current_pids = set()
-                for proc in psutil.process_iter(['pid', 'name']):
-                    try:
-                        if 'chrome' in proc.info['name'].lower():
-                            current_pids.add(proc.info['pid'])
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                
-                # 找出新启动的进程
-                new_pids = current_pids - existing_pids
-                self.chrome_processes.extend(new_pids)
-                if new_pids:
-                    self.log_signal.emit(f"检测到新启动的Chrome进程: {list(new_pids)}")
-        except Exception as e:
-            self.log_signal.emit(f"更新Chrome进程列表时出错: {str(e)}")
-    
-    def cleanup_browser(self):
-        """清理浏览器资源，确保完全关闭"""
-        if self.driver:
-            try:
-                # 首先尝试正常关闭
-                self.driver.quit()
-                self.log_signal.emit("浏览器已正常关闭")
-            except Exception as e:
-                self.log_signal.emit(f"正常关闭浏览器失败: {str(e)}，尝试强制关闭")
-            finally:
-                self.driver = None
-        
-        # 等待一段时间让浏览器进程完全退出
-        self.wait_with_delay(2)  # 统一延迟控制
-        
-        # 强制关闭残留的Chrome进程
-        try:
-            self.kill_chrome_processes()
-            self.wait_with_delay(1)  # 统一延迟控制，等待进程完全关闭
-            self.log_signal.emit("浏览器清理完成")
-        except Exception as e:
-            self.log_signal.emit(f"清理浏览器进程时出错: {str(e)}")
-    
     def run(self):
         self.running = True
         self.paused = False
         
-        # 初始化WebDriver
-        # 跟踪启动前的Chrome进程
-        existing_pids = self.track_chrome_processes()
-        
-        options = webdriver.ChromeOptions()
-        for option in BROWSER_OPTIONS:
-            options.add_argument(option)
+        # 初始化WebDriver (支持 Edge 与 Chrome 智能自适应)
+        existing_pids = self.track_browser_processes()
         
         # 根据配置决定是否显示浏览器窗口
         # 打包环境下强制显示浏览器窗口
         if hasattr(sys, '_MEIPASS'):
-            self.log_signal.emit("")
             show_browser = True
         else:
-            # 开发环境下使用配置文件设置
             show_browser = config.SHOW_BROWSER_WINDOW
-        
-        if not show_browser:
-            options.add_argument("--headless")  # 无头模式，不显示浏览器界面
-            self.log_signal.emit("浏览器运行在无头模式")
-        else:
-            self.log_signal.emit("浏览器窗口将显示，便于调试")
         
         try:
             self.log_signal.emit("正在初始化WebDriver...")
-            self.driver = webdriver.Chrome(options=options)
+            self.driver, self.actual_browser_type = create_webdriver(
+                browser_type=self.browser_type,
+                options_list=BROWSER_OPTIONS,
+                show_browser=show_browser,
+                log_callback=self.log_signal.emit,
+                allow_fallback=True
+            )
             if self.driver:
-                self.log_signal.emit(f"WebDriver初始化成功, 浏览器窗口句柄: {self.driver.current_window_handle}")
-                # 更新Chrome进程列表，记录新启动的进程
-                self.update_chrome_processes(existing_pids)
+                self.log_signal.emit(f"WebDriver初始化成功 [{self.actual_browser_type.upper()}], 窗口句柄: {self.driver.current_window_handle}")
+                # 更新进程列表，记录新启动的进程
+                self.update_browser_processes(existing_pids)
             else:
                 self.log_signal.emit("❌ WebDriver初始化失败，实例为空")
-                self.running = False # 停止运行
+                self.running = False
         except Exception as e:
             self.log_signal.emit(f"❌ WebDriver初始化时发生严重错误: {str(e)}")
-            self.running = False # 停止运行
+            self.running = False
         
         try:
             total_accounts = len(self.accounts)
@@ -358,9 +397,12 @@ class BrowserAutomation(QThread):
                     elif ("invalid session id" in error_str or 
                         "session deleted" in error_str or 
                         "chrome not reachable" in error_str or
+                        "edge not reachable" in error_str or
                         "gethandleverifier" in error_str or
                         "no such session" in error_str or
                         "disconnected" in error_str or
+                        "target window already closed" in error_str or
+                        "web view not found" in error_str or
                         "crashed" in error_str):
                         
                         # 如果程序已停止，不输出错误信息
@@ -379,46 +421,32 @@ class BrowserAutomation(QThread):
                                 except:
                                     pass
                             
-                            # 确保所有Chrome进程都已关闭
-                            self.kill_chrome_processes()
+                            # 确保所有自动化关联进程都已关闭
+                            self.kill_browser_processes()
                             
                             # 等待进程完全关闭
                             self.wait_with_delay(3)  # 统一延迟控制
                             
                             # 重新初始化浏览器
-                            # 跟踪重新启动前的Chrome进程
-                            existing_pids = self.track_chrome_processes()
-                            
-                            options = webdriver.ChromeOptions()
-                            for option in BROWSER_OPTIONS:
-                                options.add_argument(option)
+                            existing_pids = self.track_browser_processes()
                             
                             # 打包环境下强制显示浏览器窗口
                             if hasattr(sys, '_MEIPASS'):
-                                # 检测到打包环境，强制显示浏览器窗口
-                                self.log_signal.emit("重新初始化：检测到打包环境，强制显示浏览器窗口")
                                 show_browser = True
                             else:
-                                # 开发环境下使用配置文件设置
                                 show_browser = config.SHOW_BROWSER_WINDOW
                             
-                            if not show_browser:
-                                options.add_argument("--headless")
+                            self.driver, self.actual_browser_type = create_webdriver(
+                                browser_type=self.browser_type,
+                                options_list=BROWSER_OPTIONS,
+                                show_browser=show_browser,
+                                log_callback=self.log_signal.emit,
+                                allow_fallback=True
+                            )
                             
-                            # 添加额外的崩溃恢复选项
-                            options.add_experimental_option('excludeSwitches', ['enable-logging'])
-                            # 移除detach选项，确保浏览器可以正常关闭
-                            
-                            # 设置服务对象，增加启动超时时间
-                            from selenium.webdriver.chrome.service import Service
-                            service = Service()
-                            service.start()
-                            
-                            self.driver = webdriver.Chrome(options=options, service=service)
-                            
-                            # 更新Chrome进程列表，记录新启动的进程
-                            self.update_chrome_processes(existing_pids)
-                            self.log_signal.emit("浏览器重新初始化成功，将重试当前账号")
+                            # 更新进程列表，记录新启动的进程
+                            self.update_browser_processes(existing_pids)
+                            self.log_signal.emit(f"浏览器重新初始化成功 [{self.actual_browser_type.upper()}]，将重试当前账号")
                             
                             # 重试当前账号，不增加索引
                             continue
@@ -440,6 +468,12 @@ class BrowserAutomation(QThread):
                                 f.write(f"当前URL: 无法获取（浏览器会话失效）\n")
                             f.write(f"错误信息: {str(e)}\n")
                             f.write(f"详细堆栈:\n{traceback.format_exc()}\n")
+                    
+                    # 确保异常退出后清理会话，防止污染下一个账号
+                    try:
+                        self.reset_session_state()
+                    except Exception:
+                        pass
                 
                 self.current_account_index += 1
                 
@@ -477,18 +511,41 @@ class BrowserAutomation(QThread):
         current_progress = int((self.current_account_index / len(self.accounts)) * 100)
         self.progress_signal.emit(current_progress, f"正在登录账号: {account['username']}")
         
-        # 打开登录页面
-        self.driver.get(WEBSITE_URL)
+        # 1. 重置浏览器会话与弹窗状态，确保环境干净独立
+        self.reset_session_state()
+        self.wait_with_delay(0.5)
         
-        # 点击登录按钮打开登录框
-        login_button = self.get_wait().until(
-            EC.element_to_be_clickable((By.XPATH, XPATHS["login_button"])))
-        login_button.click()
-        self.wait_with_delay() # 统一延迟控制
-        
+        # 2. 检查登录框是否已经可见
+        modal_visible = False
+        try:
+            modal = self.driver.find_element(By.ID, XPATHS["login_modal"])
+            if modal.is_displayed():
+                modal_visible = True
+        except Exception:
+            modal_visible = False
+
+        if not modal_visible:
+            # 优先点击首页登录按钮，若点击超时或受阻则通过原生JS执行showLoginModal()
+            try:
+                login_button = self.get_wait(5).until(
+                    EC.element_to_be_clickable((By.XPATH, XPATHS["login_button"])))
+                login_button.click()
+            except Exception:
+                self.log_signal.emit("界面未直接点中登录按钮，尝试执行showLoginModal()脚本唤出...")
+                try:
+                    self.driver.execute_script("try { showLoginModal(); } catch(e) {}")
+                except Exception:
+                    pass
+
         # 等待登录框出现
-        self.get_wait().until(
-            EC.visibility_of_element_located((By.ID, XPATHS["login_modal"])))
+        try:
+            self.get_wait(6).until(
+                EC.visibility_of_element_located((By.ID, XPATHS["login_modal"])))
+        except TimeoutException:
+            # 二次兜底：再次强制JS唤出并等待
+            self.driver.execute_script("try { showLoginModal(); } catch(e) {}")
+            self.get_wait(4).until(
+                EC.visibility_of_element_located((By.ID, XPATHS["login_modal"])))
         
         # 输入用户名和密码（使用缓存）
         username_input = self.find_element_optimized(By.ID, XPATHS["username_input"], cache_key="username_input")
@@ -524,87 +581,97 @@ class BrowserAutomation(QThread):
                 self.log_signal.emit(f"直接点击登录按钮也失败: {str(e2)}")
                 raise Exception("无法执行登录操作")
         
-        self.wait_with_delay(1) # 等待登录处理
-        
-        # 等待登录成功
+        # 智能显式等待登录结果（页面跳转成功或捕获真实错误弹窗，杜绝静态源码误判）
+        login_success = False
+        login_error_text = None
         try:
-            # 等待登录处理完成
-            self.wait_with_delay(2)  # 统一延迟控制
-            
-            # 检查是否有layer.js错误弹窗
-            error_detected = self.check_login_errors()
-            if error_detected:
-                error_info = error_detected
-                self.log_signal.emit(f"账号 {account['username']} 登录失败: {error_info}")
-                raise Exception(f"登录失败: {error_info}")
-            
-            # 再等待一秒确保页面完全加载
-            self.wait_with_delay(1)  # 统一延迟控制
-            
-            # 使用改进的登录状态验证
-            if self.verify_login_status():
-                self.log_signal.emit(f"账号 {account['username']} 登录成功")
-                
-                # 如果是viewHomework页面，需要导航到myHomework页面
-                current_url = self.driver.current_url
-                if "viewHomework.do" in current_url:
-                    try:
-                        self.log_signal.emit("当前在作业详情页面，尝试导航到作业列表页面")
-                        # 构造myHomework页面URL
-                        base_url = current_url.split('/hw/')[0] + '/hw/stu/myHomework.do'
-                        self.driver.get(base_url)
-                        self.wait_with_delay(1)
-                        self.log_signal.emit(f"已导航到作业列表页面: {self.driver.current_url}")
-                    except Exception as nav_e:
-                        self.log_signal.emit(f"导航到作业列表页面失败: {str(nav_e)}")
-                
-                # 继续处理课程
-                self.process_courses()
-                
-                # 尝试登出
+            def _check_login_state(driver):
+                nonlocal login_error_text
+                # 1. 成功：页面URL发生跳转
+                url = driver.current_url or ""
+                if any(k in url for k in ["myHomework.do", "stu/", "viewHomework.do"]):
+                    return True
+                # 2. 成功：页面上出现了退出链接
                 try:
-                    logout_link = WebDriverWait(self.driver, TIMEOUTS["element_wait"]).until(
-                        EC.element_to_be_clickable((By.XPATH, XPATHS["logout_link"])))
-                    logout_link.click()
-                    self.wait_with_delay() # 统一延迟控制
-                    
-                    # 等待登出成功（减少等待时间）
-                    WebDriverWait(self.driver, 3).until(
-                        lambda driver: "fore/index.do" in driver.current_url or "index.do" in driver.current_url)
-                    self.log_signal.emit(f"账号 {account['username']} 已登出")
-                except TimeoutException:
-                    self.log_signal.emit(f"账号 {account['username']} 登出按钮未找到，可能已经登出或页面状态异常")
-                    # 尝试直接导航到首页来完成登出
-                    try:
-                        self.driver.get(WEBSITE_URL + "?out=1")
-                        self.wait_with_delay(1)
-                        self.log_signal.emit(f"账号 {account['username']} 已通过导航到首页完成登出")
-                    except Exception as nav_e:
-                        self.log_signal.emit(f"导航到首页失败: {str(nav_e)}")
-                except Exception as logout_e:
-                    self.log_signal.emit(f"登出过程出错: {str(logout_e)}")
-                    # 尝试直接导航到首页
-                    try:
-                        self.driver.get(WEBSITE_URL + "?out=1")
-                        self.wait_with_delay(1)
-                        self.log_signal.emit(f"账号 {account['username']} 已通过导航到首页完成登出")
-                    except Exception as nav_e:
-                        self.log_signal.emit(f"导航到首页失败: {str(nav_e)}")
+                    for logout in driver.find_elements(By.XPATH, XPATHS["logout_link"]):
+                        if logout.is_displayed():
+                            return True
+                except Exception:
+                    pass
+                # 3. 失败：真实弹出了可见的错误提示
+                err = self.check_login_errors()
+                if err:
+                    login_error_text = err
+                    return True
+                return False
+
+            WebDriverWait(self.driver, 10, poll_frequency=0.4).until(_check_login_state)
+            if login_error_text:
+                self.log_signal.emit(f"账号 {account['username']} 登录失败: {login_error_text}")
+                raise Exception(f"登录失败: {login_error_text}")
+            login_success = True
+        except TimeoutException:
+            # 10秒超时后做最终核验
+            if self.verify_login_status():
+                login_success = True
             else:
-                # 如果登录状态验证失败，再次检查是否有错误信息
-                final_error_check = self.check_login_errors()
-                if final_error_check:
-                    error_info = final_error_check
+                err = self.check_login_errors()
+                if err:
+                    self.log_signal.emit(f"账号 {account['username']} 登录失败: {err}")
+                    raise Exception(f"登录失败: {err}")
                 else:
-                    error_info = "登录状态检测超时或未知错误"
-                    
-                self.log_signal.emit(f"账号 {account['username']} 登录失败: {error_info}")
-                raise Exception(f"登录失败: {error_info}")
+                    self.log_signal.emit(f"账号 {account['username']} 登录状态检测超时")
+                    raise Exception("登录失败: 登录状态检测超时")
+            
+        # 登录成功，继续后续流程
+        if login_success:
+            self.log_signal.emit(f"账号 {account['username']} 登录成功")
+            
+            # 如果是viewHomework页面，需要导航到myHomework页面
+            current_url = self.driver.current_url or ""
+            if "viewHomework.do" in current_url:
+                try:
+                    self.log_signal.emit("当前在作业详情页面，尝试导航到作业列表页面")
+                    base_url = current_url.split('/hw/')[0] + '/hw/stu/myHomework.do'
+                    self.driver.get(base_url)
+                    self.wait_with_delay(1)
+                    self.log_signal.emit(f"已导航到作业列表页面: {self.driver.current_url}")
+                except Exception as nav_e:
+                    self.log_signal.emit(f"导航到作业列表页面失败: {str(nav_e)}")
+            
+            # 继续处理课程
+            self.process_courses()
+            
+            # 尝试登出
+            try:
+                logout_link = WebDriverWait(self.driver, TIMEOUTS["element_wait"]).until(
+                    EC.element_to_be_clickable((By.XPATH, XPATHS["logout_link"])))
+                logout_link.click()
+                self.wait_with_delay() # 统一延迟控制
                 
-        except Exception as e:
-            if "登录失败" not in str(e):
-                self.log_signal.emit(f"登录处理过程出错: {str(e)}")
-            raise
+                # 等待登出成功
+                WebDriverWait(self.driver, 3).until(
+                    lambda driver: "fore/index.do" in (driver.current_url or "") or "index.do" in (driver.current_url or ""))
+                self.log_signal.emit(f"账号 {account['username']} 已登出")
+            except TimeoutException:
+                self.log_signal.emit(f"账号 {account['username']} 登出按钮未找到，可能已经登出或页面状态异常")
+                try:
+                    self.driver.get(WEBSITE_URL + "?out=1")
+                    self.wait_with_delay(1)
+                    self.log_signal.emit(f"账号 {account['username']} 已通过导航到首页完成登出")
+                except Exception as nav_e:
+                    self.log_signal.emit(f"导航到首页失败: {str(nav_e)}")
+            except Exception as logout_e:
+                self.log_signal.emit(f"登出过程出错: {str(logout_e)}")
+                try:
+                    self.driver.get(WEBSITE_URL + "?out=1")
+                    self.wait_with_delay(1)
+                    self.log_signal.emit(f"账号 {account['username']} 已通过导航到首页完成登出")
+                except Exception as nav_e:
+                    self.log_signal.emit(f"导航到首页失败: {str(nav_e)}")
+            finally:
+                # 登出后彻底重置会话，为下一个账号提供纯净环境
+                self.reset_session_state()
     
     def process_courses(self):
         try:
@@ -1439,97 +1506,16 @@ class BrowserAutomation(QThread):
             self.log_signal.emit(f"标注跳过作业时出错: {str(e)}")
 
 
-class QuestionBankImporter(QObject):
+class QuestionBankImporter(QObject, BaseBrowserWorker):
     """题库导入器 - 从已完成账号导入题库"""
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int, str)  # 进度信号: (百分比, 描述)
     
-    def __init__(self, question_db, show_browser=True):
-        super().__init__()
+    def __init__(self, question_db, show_browser=True, browser_type=None):
+        QObject.__init__(self)
+        BaseBrowserWorker.__init__(self, browser_type=browser_type, show_browser=show_browser)
         self.question_db = question_db
-        self.driver = None
-        self.delay_multiplier = 1.0  # 延迟倍数，与主程序保持一致
-        self.show_browser = show_browser  # 是否显示浏览器窗口
-        self.chrome_processes = []  # 记录当前线程启动的Chrome进程
 
-    def kill_chrome_processes(self):
-        """只关闭当前线程的Chrome进程"""
-        try:
-            if psutil and self.chrome_processes:
-                for pid in self.chrome_processes[:]:
-                    try:
-                        proc = psutil.Process(pid)
-                        if proc.is_running() and 'chrome' in proc.name().lower():
-                            proc.kill()
-                            self.log_signal.emit(f"已关闭当前线程的Chrome进程: {pid}")
-                            self.chrome_processes.remove(pid)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
-                        if pid in self.chrome_processes:
-                            self.chrome_processes.remove(pid)
-                        pass
-            
-            if hasattr(self, 'driver') and self.driver and hasattr(self.driver, 'service'):
-                try:
-                    service = self.driver.service
-                    if hasattr(service, 'process') and service.process:
-                        service.process.terminate()
-                        self.log_signal.emit("已通过service关闭chromedriver进程")
-                except Exception as e:
-                    self.log_signal.emit(f"通过service关闭进程失败: {str(e)}")
-        except Exception as e:
-            self.log_signal.emit(f"关闭Chrome进程时出错: {str(e)}")
-
-    def track_chrome_processes(self):
-        """跟踪当前启动的Chrome进程"""
-        try:
-            if psutil:
-                existing_pids = set()
-                for proc in psutil.process_iter(['pid', 'name']):
-                    try:
-                        if 'chrome' in proc.info['name'].lower():
-                            existing_pids.add(proc.info['pid'])
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                return existing_pids
-        except Exception as e:
-            self.log_signal.emit(f"跟踪Chrome进程时出错: {str(e)}")
-        return set()
-
-    def update_chrome_processes(self, existing_pids):
-        """更新Chrome进程列表，记录新启动的进程"""
-        try:
-            if psutil:
-                current_pids = set()
-                for proc in psutil.process_iter(['pid', 'name']):
-                    try:
-                        if 'chrome' in proc.info['name'].lower():
-                            current_pids.add(proc.info['pid'])
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-                
-                new_pids = current_pids - existing_pids
-                self.chrome_processes.extend(new_pids)
-                if new_pids:
-                    self.log_signal.emit(f"检测到新启动的Chrome进程: {list(new_pids)}")
-        except Exception as e:
-            self.log_signal.emit(f"更新Chrome进程列表时出错: {str(e)}")
-    
-    def wait_with_delay(self, base_delay=None, min_delay=None):
-        """统一的延迟控制方法"""
-        if base_delay is None:
-            base_delay = OPERATION_DELAY['default']
-        actual_delay = base_delay * self.delay_multiplier
-        
-        # 确保最小延迟时间，防止页面加载不完整
-        if min_delay is not None:
-            actual_delay = max(actual_delay, min_delay)
-        
-        time.sleep(actual_delay)
-    
-    def set_delay_multiplier(self, multiplier):
-        """设置延迟倍数"""
-        self.delay_multiplier = multiplier
-        
     def import_from_completed_account(self, account, password):
         """从已完成账号导入题库"""
         try:
@@ -1560,30 +1546,21 @@ class QuestionBankImporter(QObject):
             self._cleanup()
     
     def _init_browser(self):
-        """初始化浏览器"""
+        """初始化浏览器 (支持 Edge 与 Chrome 智能自适应)"""
         try:
-            # 跟踪启动前的Chrome进程
-            existing_pids = self.track_chrome_processes()
+            existing_pids = self.track_browser_processes()
             
-            # 使用与主程序相同的浏览器配置
-            options = webdriver.ChromeOptions()
-            for option in BROWSER_OPTIONS:
-                options.add_argument(option)
+            self.driver, self.actual_browser_type = create_webdriver(
+                browser_type=self.browser_type,
+                options_list=BROWSER_OPTIONS,
+                show_browser=self.show_browser,
+                log_callback=self.log_signal.emit,
+                allow_fallback=True
+            )
             
-            # 根据实例配置决定是否显示浏览器窗口
-            if not self.show_browser:
-                options.add_argument("--headless")  # 无头模式，不显示浏览器界面
-                self.log_signal.emit("🌐 浏览器运行在无头模式")
-            else:
-                self.log_signal.emit("🌐 浏览器窗口将显示，便于调试")
-            
-            self.driver = webdriver.Chrome(options=options)
-            
-            # 更新Chrome进程列表，记录新启动的进程
-            self.update_chrome_processes(existing_pids)
-            
+            self.update_browser_processes(existing_pids)
             self.driver.set_page_load_timeout(30)
-            self.log_signal.emit("🌐 浏览器初始化成功")
+            self.log_signal.emit(f"🌐 题库导入器浏览器初始化成功 [{self.actual_browser_type.upper()}]")
             return True
             
         except Exception as e:
@@ -1637,7 +1614,15 @@ class QuestionBankImporter(QObject):
                 submit_button = self.driver.find_element(By.XPATH, XPATHS["submit_button"])
                 submit_button.click()
             
-            self.wait_with_delay(3, min_delay=1.5)  # 统一延迟控制，等待登录处理，最少1.5秒
+            # 智能显式等待登录结果（跳转成功或捕获错误弹窗）
+            try:
+                WebDriverWait(self.driver, 6).until(
+                    lambda d: "myHomework.do" in d.current_url or "stu/" in d.current_url or
+                              d.find_elements(By.CSS_SELECTOR, ".layui-layer-content")
+                )
+            except TimeoutException:
+                pass
+            self.wait_with_delay(0.5)
             
             # 检查登录是否成功
             if self._check_login_success():
@@ -1657,50 +1642,8 @@ class QuestionBankImporter(QObject):
             return False
     
     def _check_login_error(self):
-        """检查登录错误信息 - 复用主程序的错误检查逻辑"""
-        try:
-            # 检查是否有弹窗错误信息
-            layers = self.driver.find_elements(By.CSS_SELECTOR, ".layui-layer-content")
-            for layer in layers:
-                try:
-                    # 检查弹窗是否可见
-                    if layer.is_displayed():
-                        layer_text = layer.text.strip()
-                        self.log_signal.emit(f"检测到弹窗内容: {layer_text}")
-                        
-                        # 检查常见的登录错误信息
-                        if any(error in layer_text for error in [
-                            "用户名或密码错误", "密码错误", "账号不存在", 
-                            "用户被置为无效", "请填写用户名", "请填写密码"
-                        ]):
-                            # 尝试关闭弹窗
-                            try:
-                                close_btn = layer.find_element(By.CSS_SELECTOR, ".layui-layer-close")
-                                if close_btn.is_displayed():
-                                    close_btn.click()
-                                    self.wait_with_delay(0.5)  # 统一延迟控制
-                            except:
-                                pass
-                            return layer_text
-                except:
-                    continue
-            
-            # 也检查页面源码中的错误信息（作为备用方法）
-            page_source = self.driver.page_source
-            if "用户名或密码错误" in page_source:
-                return "用户名或密码错误"
-            elif "密码错误" in page_source:
-                return "密码错误"
-            elif "账号不存在" in page_source:
-                return "账号不存在"
-            elif "用户被置为无效" in page_source:
-                return "用户被置为无效"
-                
-            return None
-            
-        except Exception as e:
-            self.log_signal.emit(f"检查登录错误时出现异常: {str(e)}")
-            return None
+        """检查登录错误信息 - 复用BaseBrowserWorker的严格弹窗检查逻辑"""
+        return self.check_login_errors()
     
     def _check_login_success(self):
         """检查登录是否成功"""
@@ -2060,11 +2003,4 @@ class QuestionBankImporter(QObject):
     
     def _cleanup(self):
         """清理资源"""
-        try:
-            if self.driver:
-                self.driver.quit()
-                self.log_signal.emit("🧹 浏览器资源已清理")
-        except Exception as e:
-            self.log_signal.emit(f"⚠️ 清理资源时发生错误: {str(e)}")
-        finally:
-            self.kill_chrome_processes()
+        self.cleanup_browser()

@@ -12,12 +12,13 @@ class ThreadWorker(QThread):
     progress_signal = pyqtSignal(int, str, int)  # 进度信号，包含线程ID
     finished_signal = pyqtSignal(int)  # 完成信号，包含线程ID
     
-    def __init__(self, thread_id, accounts, question_db, delay_multiplier=1.0):
+    def __init__(self, thread_id, accounts, question_db, delay_multiplier=1.0, browser_type=None):
         super().__init__()
         self.thread_id = thread_id
         self.accounts = accounts
         self.question_db = question_db
         self.delay_multiplier = delay_multiplier
+        self.browser_type = browser_type
         self.running = False
         self.paused = False
         self.automation = None
@@ -84,7 +85,7 @@ class ThreadWorker(QThread):
             self.log_signal.emit(f"线程 {self.thread_id} 开始处理 {len(self.accounts)} 个账号", self.thread_id)
             
             # 创建自动化实例
-            self.automation = BrowserAutomation(self.accounts, self.question_db)
+            self.automation = BrowserAutomation(self.accounts, self.question_db, browser_type=self.browser_type)
             self.automation.set_operation_delay(self.automation.operation_delay * self.delay_multiplier)
             
             # 连接信号（添加日志过滤）
@@ -144,11 +145,16 @@ class MultiThreadManager(QObject):
         self.running = False
         self.paused = False
         self.delay_multiplier = 1.0
+        self.browser_type = "auto"
         self.finished_threads = 0
         
     def set_thread_count(self, count):
         """设置线程数量"""
         self.thread_count = max(1, min(count, 32))  # 限制在1-32之间
+
+    def set_browser_type(self, browser_type):
+        """设置浏览器引擎类型"""
+        self.browser_type = browser_type or "auto"
         
     def set_delay_multiplier(self, multiplier):
         """设置延迟倍数"""
@@ -208,7 +214,7 @@ class MultiThreadManager(QObject):
         # 创建并启动工作线程
         global_start_index = 0
         for i, thread_accounts in enumerate(distributed_accounts):
-            worker = ThreadWorker(i + 1, thread_accounts, self.question_db, self.delay_multiplier)
+            worker = ThreadWorker(i + 1, thread_accounts, self.question_db, self.delay_multiplier, self.browser_type)
             worker.global_start_index = global_start_index  # 设置全局起始索引
             
             # 连接信号

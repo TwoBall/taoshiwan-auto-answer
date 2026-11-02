@@ -38,32 +38,54 @@ class QuestionDatabase:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # 创建题目表
+            # 创建题目表 (增加 clean_content 预处理字段以提升检索性能)
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS questions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
                 answer TEXT NOT NULL,
                 type TEXT NOT NULL,
-                keywords TEXT
+                keywords TEXT,
+                clean_content TEXT
             )
             ''')
             
-            # 创建索引
+            # 兼容存量数据库无损平滑迁移
+            cursor.execute("PRAGMA table_info(questions)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'clean_content' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE questions ADD COLUMN clean_content TEXT")
+                except Exception:
+                    pass
+
+            # 自动为历史存量题目补齐预清洗字段
+            cursor.execute("SELECT id, content FROM questions WHERE clean_content IS NULL OR clean_content = ''")
+            missing_clean = cursor.fetchall()
+            if missing_clean:
+                update_items = [(self.clean_text(c), q_id) for q_id, c in missing_clean]
+                cursor.executemany("UPDATE questions SET clean_content = ? WHERE id = ?", update_items)
+
+            # 创建索引加速精确与前缀匹配
             cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_content ON questions(content)
+            ''')
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_clean_content ON questions(clean_content)
             ''')
             
             conn.commit()
     
-    def add_question(self, content, answer, type, keywords=None):
+    def add_question(self, content, answer, type, keywords=None, clean_content=None):
+        if not clean_content:
+            clean_content = self.clean_text(content)
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
             cursor.execute('''
-            INSERT INTO questions (content, answer, type, keywords)
-            VALUES (?, ?, ?, ?)
-            ''', (content, answer, type, keywords))
+            INSERT INTO questions (content, answer, type, keywords, clean_content)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (content, answer, type, keywords, clean_content))
             
             conn.commit()
     
@@ -79,42 +101,42 @@ class QuestionDatabase:
         return chars, tokens
 
     def find_answer(self, question_text):
+        if not question_text:
+            return None
+
+        cleaned_query = self.clean_text(question_text)
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # 先尝试精确匹配
+            # 1. 优先走索引做 O(1) 快速精确比对（原始文本匹配 或 清洗后标准文本匹配）
             cursor.execute('''
             SELECT answer FROM questions
-            WHERE content = ?
-            ''', (question_text,))
+            WHERE content = ? OR (clean_content IS NOT NULL AND clean_content = ?)
+            LIMIT 1
+            ''', (question_text, cleaned_query))
             
             result = cursor.fetchone()
-            
             if result:
                 return result[0]
             
-            # 预处理查询文本
-            cleaned_query = self.clean_text(question_text)
             if not cleaned_query:
                 return None
                 
             query_chars, query_tokens = self.extract_features(cleaned_query)
             
-            # 如果没有精确匹配，使用优化的模糊匹配
+            # 2. 如果没有精确匹配，从数据库直接获取预清洗数据进行模糊匹配
+            # 直接提取 clean_content，完全免去每行重复调用正则与分词清洗，速度提升数倍
             cursor.execute('''
-            SELECT answer, content FROM questions
+            SELECT answer, clean_content FROM questions
+            WHERE clean_content IS NOT NULL AND clean_content != ''
             ''')
             
             best_match = None
             highest_similarity = 0
             min_threshold = SIMILARITY_THRESHOLD  # 使用配置的相似度阈值
             
-            # 批量处理，减少函数调用开销
-            for answer, content in cursor.fetchall():
-                cleaned_content = self.clean_text(content)
-                if not cleaned_content:
-                    continue
-                
+            for answer, cleaned_content in cursor.fetchall():
                 # 检查包含关系（如题干子串包含），给予很高的基础匹配度
                 if len(cleaned_query) >= 4 and len(cleaned_content) >= 4:
                     if cleaned_query in cleaned_content or cleaned_content in cleaned_query:
@@ -235,13 +257,15 @@ class QuestionDatabase:
         return self.calculate_similarity_fast(clean_text1, clean_text2, words1, words2)
     
     def question_exists(self, content):
-        """检查题目是否已存在"""
+        """检查题目是否已存在（双重防抖：原始内容或清洗内容一致均判定已存在）"""
+        clean = self.clean_text(content) if content else ""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
             cursor.execute('''
-            SELECT COUNT(*) FROM questions WHERE content = ?
-            ''', (content,))
+            SELECT COUNT(*) FROM questions 
+            WHERE content = ? OR (clean_content IS NOT NULL AND clean_content != '' AND clean_content = ?)
+            ''', (content, clean))
             
             result = cursor.fetchone()
             return result[0] > 0 if result else False
@@ -251,7 +275,7 @@ class QuestionDatabase:
             cursor = conn.cursor()
             
             cursor.execute('''
-            SELECT id, content, answer, type, keywords FROM questions
+            SELECT id, content, answer, type, keywords, clean_content FROM questions
             ''')
             
             return cursor.fetchall()
