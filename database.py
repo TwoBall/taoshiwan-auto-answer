@@ -67,6 +67,17 @@ class QuestionDatabase:
             
             conn.commit()
     
+    def extract_features(self, clean_text):
+        """提取文本的多维度特征（分词、字符集、2-gram）以增强中文模糊匹配"""
+        chars = set(clean_text.replace(' ', ''))
+        tokens = set(clean_text.split())
+        compact = clean_text.replace(' ', '')
+        # 提取二元字符组 (2-gram)，解决中文没有空格导致分词交集为空的问题
+        if len(compact) >= 2:
+            for i in range(len(compact) - 1):
+                tokens.add(compact[i:i+2])
+        return chars, tokens
+
     def find_answer(self, question_text):
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -84,10 +95,12 @@ class QuestionDatabase:
             
             # 预处理查询文本
             cleaned_query = self.clean_text(question_text)
-            query_words = set(cleaned_query.split())
+            if not cleaned_query:
+                return None
+                
+            query_chars, query_tokens = self.extract_features(cleaned_query)
             
             # 如果没有精确匹配，使用优化的模糊匹配
-            # 只获取必要的字段，减少内存使用
             cursor.execute('''
             SELECT answer, content FROM questions
             ''')
@@ -98,15 +111,39 @@ class QuestionDatabase:
             
             # 批量处理，减少函数调用开销
             for answer, content in cursor.fetchall():
-                # 快速预筛选：检查是否有共同词汇
                 cleaned_content = self.clean_text(content)
-                content_words = set(cleaned_content.split())
-                
-                # 如果没有共同词汇，跳过详细计算
-                if not query_words.intersection(content_words):
+                if not cleaned_content:
                     continue
                 
-                similarity = self.calculate_similarity_fast(cleaned_query, cleaned_content, query_words, content_words)
+                # 检查包含关系（如题干子串包含），给予很高的基础匹配度
+                if len(cleaned_query) >= 4 and len(cleaned_content) >= 4:
+                    if cleaned_query in cleaned_content or cleaned_content in cleaned_query:
+                        match_ratio = min(len(cleaned_query), len(cleaned_content)) / max(len(cleaned_query), len(cleaned_content))
+                        similarity = max(0.8, 0.7 + match_ratio * 0.3)
+                        if similarity > highest_similarity:
+                            highest_similarity = similarity
+                            best_match = answer
+                            if similarity > 0.9:
+                                break
+                        continue
+
+                content_chars, content_tokens = self.extract_features(cleaned_content)
+                
+                # 快速预筛选：检查二元组或字符集合是否有交集
+                char_inter = query_chars.intersection(content_chars)
+                if not char_inter:
+                    continue
+                
+                # 字符重合过低直接跳过（低于较短文本字符数的 30%）
+                min_len = min(len(query_chars), len(content_chars))
+                if min_len > 0 and (len(char_inter) / min_len) < 0.3:
+                    continue
+                
+                similarity = self.calculate_similarity_fast(
+                    cleaned_query, cleaned_content,
+                    query_tokens, content_tokens,
+                    query_chars, content_chars
+                )
                 if similarity > highest_similarity:
                     highest_similarity = similarity
                     best_match = answer
@@ -124,9 +161,12 @@ class QuestionDatabase:
     def clean_text(self, text):
         """改进的文本清理方法，提高匹配准确性"""
         import re
+        if not text:
+            return ""
         
-        # 移除题号、分数等格式
-        text = re.sub(r'\d+\.\s*\(\d+分\)\s*', '', text)
+        # 移除题号、分数等格式（如 "1.(25分)" 或 "1. （25分）" 或 "一、"）
+        text = re.sub(r'^\s*[\d一二三四五六七八九十]+[\.、\s]*\(\s*\d+\s*分\s*\)\s*', '', text)
+        text = re.sub(r'^\s*[\d一二三四五六七八九十]+[\.、\s]+', '', text)
         
         # 统一标点符号：将中文标点替换为英文标点
         text = text.replace('，', ',')
@@ -149,35 +189,35 @@ class QuestionDatabase:
         text = re.sub(r'\s+', ' ', text).strip()
         return text.lower()
     
-    def calculate_similarity_fast(self, clean_text1, clean_text2, words1, words2):
-        """优化的快速相似度计算"""
-        # 如果清理后的文本包含关系，给予较高相似度
+    def calculate_similarity_fast(self, clean_text1, clean_text2, tokens1, tokens2, chars1=None, chars2=None):
+        """优化的快速相似度计算，结合 N-Gram 与字符集合"""
+        # 子串直接包含
         if clean_text1 in clean_text2 or clean_text2 in clean_text1:
-            return 0.8
+            ratio = min(len(clean_text1), len(clean_text2)) / max(len(clean_text1), len(clean_text2))
+            return 0.75 + ratio * 0.25
         
-        # 快速Jaccard相似度计算
-        if not words1 and not words2:
+        # 词汇与 2-gram 的 Jaccard 相似度
+        if not tokens1 and not tokens2:
             return 1.0
-        if not words1 or not words2:
+        if not tokens1 or not tokens2:
             return 0.0
         
-        intersection = words1.intersection(words2)
-        union = words1.union(words2)
-        jaccard = len(intersection) / len(union) if union else 0
+        token_intersection = tokens1.intersection(tokens2)
+        token_union = tokens1.union(tokens2)
+        token_jaccard = len(token_intersection) / len(token_union) if token_union else 0
         
-        # 如果词汇相似度已经很高，直接返回
-        if jaccard > 0.7:
-            return jaccard
-        
-        # 只有在词汇相似度较低时才进行字符级计算
-        chars1 = set(clean_text1.replace(' ', ''))
-        chars2 = set(clean_text2.replace(' ', ''))
+        # 字符集合的匹配度
+        if chars1 is None:
+            chars1 = set(clean_text1.replace(' ', ''))
+        if chars2 is None:
+            chars2 = set(clean_text2.replace(' ', ''))
+            
         char_intersection = chars1.intersection(chars2)
         char_union = chars1.union(chars2)
         char_similarity = len(char_intersection) / len(char_union) if char_union else 0
         
-        # 综合相似度（词级别和字符级别的加权平均）
-        return (jaccard * 0.6 + char_similarity * 0.4)
+        # 综合相似度：2-gram权重 0.65，单字权重 0.35
+        return (token_jaccard * 0.65 + char_similarity * 0.35)
     
     def calculate_similarity(self, text1, text2):
         """保持向后兼容的相似度计算方法"""
