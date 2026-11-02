@@ -1148,17 +1148,56 @@ class BrowserAutomation(QThread):
     
     @lru_cache(maxsize=1000)
     def clean_question_text(self, question_text):
-        """优化的题目文本清理方法，使用LRU缓存"""
+        """优化的题目文本清理方法，使用LRU缓存并处理HTML标签与实体"""
         import re
+        import html
+        
+        if not question_text:
+            return ""
+            
+        # 解码HTML实体并替换不间断空格
+        cleaned = html.unescape(question_text)
+        cleaned = cleaned.replace('\xa0', ' ')
+        
+        # 将 <br> 和 </p> 替换为空格以避免词汇粘连
+        cleaned = re.sub(r'<\s*br\s*/?>|<\s*/\s*p\s*>', ' ', cleaned, flags=re.IGNORECASE)
+        # 移除其余HTML标签
+        cleaned = re.sub(r'<[^>]+>', ' ', cleaned)
         
         # 去除开头的数字编号和分数信息
         # 例如: "1.(25分)一个好的多媒体作品..." -> "一个好的多媒体作品..."
-        cleaned = re.sub(r'^\d+\.\s*\(\d+分\)\s*', '', question_text)
+        cleaned = re.sub(r'^\s*[\d一二三四五六七八九十]+[\.、\s]*\(\s*\d+\s*分\s*\)\s*', '', cleaned)
+        cleaned = re.sub(r'^\s*[\d一二三四五六七八九十]+[\.、\s]+', '', cleaned)
         
         # 去除多余的空白字符
         cleaned = re.sub(r'\s+', ' ', cleaned)
         
         return cleaned.strip()
+
+    @staticmethod
+    def clean_subjective_answer(text):
+        """清洗主观题答案，将HTML标签(<p>, <br>等)转换为真实换行，解码实体并消除冗余标签"""
+        if not text:
+            return ""
+        import html
+        # 解码HTML实体（&nbsp;, &lt;, &gt;, &amp;等）
+        cleaned = html.unescape(text)
+        # 替换不间断空格
+        cleaned = cleaned.replace('\xa0', ' ')
+        # 统一回车换行符
+        cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')
+        # 将 <br>, <br/>, <br /> 替换为换行符
+        cleaned = re.sub(r'<\s*br\s*/?>', '\n', cleaned, flags=re.IGNORECASE)
+        # 将 </p>, </div> 替换为换行符
+        cleaned = re.sub(r'<\s*/\s*(?:p|div)\s*>', '\n', cleaned, flags=re.IGNORECASE)
+        # 将 <p...>, <div...> 替换为换行符
+        cleaned = re.sub(r'<\s*(?:p|div)[^>]*>', '\n', cleaned, flags=re.IGNORECASE)
+        # 移除其余所有 HTML 标签
+        cleaned = re.sub(r'<[^>]+>', '', cleaned)
+        # 整理每一行，去除空行和行首尾无意义空白
+        lines = [line.strip() for line in cleaned.split('\n')]
+        clean_lines = [l for l in lines if l]
+        return '\n'.join(clean_lines).strip()
     
     def generate_fallback_subjective_answer(self, question_text):
         """当题库中无主观题答案时生成智能兜底文本，避免未作答导致阻断提交"""
@@ -1202,7 +1241,8 @@ class BrowserAutomation(QThread):
                 self.log_signal.emit("未找到解答题的文本输入框")
                 return False
 
-            formatted_answer = (answer or "").strip()
+            # 深度清洗答案，将 HTML 标签 (<p>, <br>) 转换为真实多行换行，去除标签字符
+            formatted_answer = self.clean_subjective_answer(answer)
             if not formatted_answer:
                 formatted_answer = "已完成作答。"
 
@@ -1963,7 +2003,7 @@ class QuestionBankImporter(QObject):
             return None
     
     def _extract_correct_answer(self, info_div):
-        """提取正确答案"""
+        """提取正确答案并转换HTML换行"""
         try:
             # 查找正确答案
             answer_spans = info_div.find_all('span')
@@ -1972,9 +2012,12 @@ class QuestionBankImporter(QObject):
                 if '【正确答案：】' in span.get_text():
                     # 正确答案在下一个span中
                     if i + 1 < len(answer_spans):
-                        answer_text = answer_spans[i + 1].get_text().strip()
+                        target_span = answer_spans[i + 1]
+                        # 获取带标签的HTML并清洗转换为真实换行
+                        raw_html = target_span.decode_contents() if hasattr(target_span, 'decode_contents') else str(target_span)
+                        answer_text = BrowserAutomation.clean_subjective_answer(raw_html)
                         # 去除可能的"分"字
-                        answer_text = re.sub(r'分$', '', answer_text)
+                        answer_text = re.sub(r'分$', '', answer_text).strip()
                         return answer_text
             
             return None

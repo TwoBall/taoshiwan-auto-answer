@@ -161,8 +161,15 @@ class QuestionDatabase:
     def clean_text(self, text):
         """改进的文本清理方法，提高匹配准确性"""
         import re
+        import html
         if not text:
             return ""
+        
+        # 解码HTML实体并替换不间断空格
+        text = html.unescape(text)
+        text = text.replace('\xa0', ' ')
+        # 移除HTML标签以防干扰题干
+        text = re.sub(r'<[^>]+>', ' ', text)
         
         # 移除题号、分数等格式（如 "1.(25分)" 或 "1. （25分）" 或 "一、"）
         text = re.sub(r'^\s*[\d一二三四五六七八九十]+[\.、\s]*\(\s*\d+\s*分\s*\)\s*', '', text)
