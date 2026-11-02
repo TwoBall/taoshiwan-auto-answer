@@ -143,9 +143,11 @@ XPATHS = {
     "back_button": "//a[contains(text(), '返回')]|//button[contains(text(), '返回')]|//button[@onclick='goBack()']|//a[@onclick='goBack()']"
 }
 
-# UI配置
+# 应用版本与标题配置
+APP_VERSION = "v2.0.0 Pro"
+
 UI_CONFIG = {
-    "window_title": "Selenium暴打淘师湾作业网",
+    "window_title": "暴打淘师湾作业网",
     "window_geometry": (100, 100, 1040, 700),  # 现代化工作台宽屏分辨率
     "global_font_family": "Microsoft YaHei, PingFang SC, Helvetica Neue, Arial, sans-serif"
 }

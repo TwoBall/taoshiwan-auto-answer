@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QFrame, QLabel, QVBoxLayout, QHBoxLayout, QStyledIt
                              QStyle, QDialog, QPushButton, QWidget)
 from PyQt5.QtCore import Qt, QRectF, QSize
 from PyQt5.QtGui import QColor, QPainter, QBrush, QPen, QFont, QPainterPath, QPixmap, QIcon
-from config import get_resource_path
+from config import get_resource_path, APP_VERSION
 import os
 
 # 现代化调色板
@@ -648,7 +648,7 @@ class AboutDialog(QDialog):
         title_label.setStyleSheet("color: #0f172a;")
         layout.addWidget(title_label)
         
-        version_label = QLabel("v2.5.0 Pro 极速自适应版 · 纯净零释放")
+        version_label = QLabel(f"{APP_VERSION} 极速自适应版 · 纯净零释放")
         version_label.setFont(QFont("Microsoft YaHei", 9, QFont.Medium))
         version_label.setAlignment(Qt.AlignCenter)
         version_label.setStyleSheet("color: #ea580c;")
